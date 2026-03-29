@@ -342,6 +342,9 @@ def print_events_block(title: str, events: List[Dict[str, Any]]) -> None:
     print(title)
     print(json.dumps(events, indent=2, ensure_ascii=False))
 
+def no_events_error() -> Dict[str, Any]:
+    return {"ok": False, "error": "No events stored yet."}
+
 # --------------------------------------------------
 # 3 LLM CALLS
 # --------------------------------------------------
@@ -580,7 +583,8 @@ def cmd_analyze() -> None:
     if not events:
         print("ANALYZE FAILED")
         print("No events stored yet.")
-        return
+        # return
+        return no_events_error()
 
     print_events_block("=== STORED EVENTS (ALL) ===", events)
 
@@ -606,7 +610,8 @@ def run_query_filter(query_filter: Dict[str, str]) -> None:
     if not events:
         print("QUERY FAILED")
         print("No events stored yet.")
-        return
+        # return
+        return no_events_error()
 
     matching_events = run_query_filter_core(events, query_filter)
 
@@ -638,14 +643,16 @@ def cmd_query(query_json_text: str) -> None:
         print("QUERY FAILED")
         print(f"Invalid JSON filter: {e}")
         return
-    run_query_filter(query_filter)
+    # run_query_filter(query_filter)
+    return run_query_filter(query_filter)
 
 def cmd_ask(user_query: str) -> None:
     events = load_events()
     if not events:
         print("ASK FAILED")
         print("No events stored yet.")
-        return
+        # return
+        return no_events_error()
 
     print("=== NATURAL LANGUAGE QUERY ===")
     print(user_query)
@@ -674,16 +681,19 @@ def cmd_ask(user_query: str) -> None:
     print(mode)
 
     if mode == "all":
-        cmd_analyze()
+        # cmd_analyze()
+        return cmd_analyze()
     else:
-        run_query_filter(filter_obj)
+        # run_query_filter(filter_obj)
+        return run_query_filter(filter_obj)
 
 def cmd_plan(user_request: str) -> None:
     events = load_events()
     if not events:
         print("PLAN FAILED")
         print("No events stored yet.")
-        return
+        # return
+        return no_events_error()
 
     print("=== NATURAL LANGUAGE ANALYSIS REQUEST ===")
     print(user_request)
@@ -777,7 +787,8 @@ def cmd_plan(user_request: str) -> None:
 
     # print("\n=== FINAL STEP OUTPUTS ===")
     # print(json.dumps(step_outputs, indent=2, ensure_ascii=False))
-    return step_outputs
+    # return step_outputs
+    return {"ok": True, "result": step_outputs}
 
 # --------------------------------------------------
 # 7 MAIN
