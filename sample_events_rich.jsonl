@@ -1,0 +1,23 @@
+{"entity":"truck_17","event_type":"shipment","location":"taipei","status":"delayed","note":"flat tire"}
+{"entity":"truck_17","event_type":"shipment","location":"taipei","status":"delayed","note":"engine issue"}
+{"entity":"truck_21","event_type":"shipment","location":"taipei","status":"delayed","note":"traffic congestion"}
+{"entity":"truck_22","event_type":"shipment","location":"taipei","status":"delayed","note":"loading delay"}
+{"entity":"truck_23","event_type":"shipment","location":"taipei","status":"ok","note":"delivered on time"}
+
+{"entity":"truck_31","event_type":"shipment","location":"tainan","status":"blocked","note":"road closure"}
+{"entity":"truck_32","event_type":"shipment","location":"tainan","status":"blocked","note":"flooded road"}
+{"entity":"truck_33","event_type":"shipment","location":"tainan","status":"blocked","note":"customs hold"}
+{"entity":"truck_34","event_type":"shipment","location":"tainan","status":"delayed","note":"weather delay"}
+{"entity":"truck_35","event_type":"shipment","location":"tainan","status":"ok","note":"on schedule"}
+
+{"entity":"truck_41","event_type":"shipment","location":"kaohsiung","status":"ok","note":"on schedule"}
+{"entity":"truck_42","event_type":"shipment","location":"kaohsiung","status":"ok","note":"delivered on time"}
+{"entity":"truck_43","event_type":"shipment","location":"kaohsiung","status":"ok","note":"no issues"}
+{"entity":"truck_44","event_type":"shipment","location":"kaohsiung","status":"delayed","note":"minor loading delay"}
+{"entity":"truck_45","event_type":"shipment","location":"kaohsiung","status":"ok","note":"normal transit"}
+
+{"entity":"truck_99","event_type":"shipment","location":"taipei","status":"delayed","note":"brake issue"}
+{"entity":"truck_99","event_type":"shipment","location":"tainan","status":"blocked","note":"accident on route"}
+{"entity":"truck_99","event_type":"shipment","location":"kaohsiung","status":"delayed","note":"driver shortage"}
+{"entity":"truck_99","event_type":"shipment","location":"taipei","status":"delayed","note":"engine overheating"}
+{"entity":"truck_99","event_type":"shipment","location":"tainan","status":"blocked","note":"bridge closure"}

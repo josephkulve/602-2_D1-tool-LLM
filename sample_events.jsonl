@@ -1,0 +1,3 @@
+{"entity":"truck_11","event_type":"shipment","location":"taipei","status":"delayed","note":"flat tire"}
+{"entity":"truck_22","event_type":"shipment","location":"tainan","status":"blocked","note":"road closure"}
+{"entity":"truck_33","event_type":"shipment","location":"kaohsiung","status":"ok","note":"on schedule"}
