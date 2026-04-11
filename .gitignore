@@ -2,3 +2,6 @@ venv/
 .env
 __pycache__/
 *.pyc
+credentials.json
+credentials_jk.json
+token.json

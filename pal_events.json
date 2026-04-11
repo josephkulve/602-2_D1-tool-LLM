@@ -14,5 +14,13 @@
     "status": "ok",
     "note": "arrived on time",
     "timestamp": "2026-03-27T11:40:03.351751+00:00"
+  },
+  {
+    "entity": "truck_0411",
+    "event_type": "shipment",
+    "location": "taipei",
+    "status": "delayed",
+    "note": "broken window",
+    "timestamp": "2026-04-11T09:04:02.906750+00:00"
   }
 ]

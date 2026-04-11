@@ -1,0 +1,1411 @@
+# pal_v7_patterns.py
+#   modified from pal_v6_file_ingest.py
+#
+# Commands:
+#   1) ingest  -> store external data
+#   2) analyze -> analyze all stored data
+#   3) query   -> exact structured filter, then analyze matching events
+#   4) ask     -> natural language -> structured filter -> query -> analyze
+#   5) plan    -> natural language -> multi-step plan JSON -> execute
+#
+# Bash examples:
+#   python pal_v7_patterns.py ingest '{"entity":"truck_17","event_type":"shipment","location":"taipei","status":"delayed","note":"flat tire"}'
+#   python pal_v7_patterns.py plan "Compare delayed shipments in Taipei vs blocked shipments in Tainan"
+#   python pal_v7_patterns.py plan "Compare truck_17 with truck_22"
+#   python pal_v7_patterns.py plan "Analyze delayed events in Taipei and compare them with all events in Kaohsiung"
+#
+# Requirements:
+#   pip install openai
+#   OPENAI_API_KEY in .env or environment
+
+import json
+import os
+import sys
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+from openai import OpenAI
+#166
+from collections import defaultdict
+
+#166
+STATUS_SCORES = {
+    "blocked": 5,
+    "delayed": 3,
+    "warning": 2,
+    "ok": 0,
+}
+
+#166
+RECURRING_BONUS = 2
+
+
+# --- MONGO FIX 02 ---
+def run_ingest(event: Dict[str, Any]) -> Dict[str, Any]:
+    errors = validate_event(event)
+    if errors:
+        return {"ok": False, "errors": errors}
+
+    event = normalize_event(event)
+
+    event_to_insert = dict(event)   # copy
+    events_collection.insert_one(event_to_insert)
+
+    return {"ok": True, "event": event}
+# --------------------
+
+# --- FILE INGEST 02: ingest JSONL file ---
+def run_ingest_file(file_path: str) -> Dict[str, Any]:
+    path = Path(file_path)
+    if not path.exists():
+        return {"ok": False, "error": f"File not found: {file_path}"}
+
+    inserted = 0
+    failed = 0
+    errors: List[str] = []
+
+    with path.open("r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                event = json.loads(line)
+            except Exception as e:
+                failed += 1
+                errors.append(f"line {line_num}: invalid JSON: {e}")
+                continue
+
+            result = run_ingest(event)
+            if result.get("ok"):
+                inserted += 1
+            else:
+                failed += 1
+                err_text = "; ".join(result.get("errors", ["unknown error"]))
+                errors.append(f"line {line_num}: {err_text}")
+
+    return {
+        "ok": True,
+        "file_path": file_path,
+        "inserted": inserted,
+        "failed": failed,
+        "errors": errors,
+    }
+# ----------------------------------------
+
+
+# --------------------------------------------------
+# 0 ENV / API KEY
+# --------------------------------------------------
+def load_dotenv(dotenv_path: str = ".env") -> None:
+    path = Path(dotenv_path)
+    if not path.exists():
+        return
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line or line.startswith("REM "):
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+# --- MONGO FIX 01 ---
+from pymongo import MongoClient
+
+load_dotenv()
+
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("OPENAI_API_KEY missing. Put it in .env or environment.")
+
+MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    raise RuntimeError("MONGO_URI missing. Put it in .env or environment.")
+
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["pal_db"]
+events_collection = db["events"]
+
+client = OpenAI(api_key=api_key)
+# --------------------
+
+
+# --------------------------------------------------
+# 1 FILES / CONSTANTS
+# --------------------------------------------------
+
+# EVENTS_FILE = Path("pal_events4.json")
+
+# --- MONGO 02 ---
+DB_NAME = "pal_db"
+COLLECTION_NAME = "events"
+# ----------------
+
+
+ALLOWED_TOP_KEYS = {
+    "timestamp",
+    "entity",
+    "event_type",
+    "location",
+    "status",
+    "note",
+}
+
+REQUIRED_KEYS = {
+    "entity",
+    "event_type",
+    "location",
+    "status",
+    "note",
+}
+
+QUERYABLE_KEYS = {
+    "timestamp",
+    "entity",
+    "event_type",
+    "location",
+    "status",
+    "note",
+}
+
+ANALYSIS_SCHEMA_TEXT = """
+Return valid JSON only, with this exact top-level structure:
+
+{
+  "summary": "short text summary",
+  "abnormal_events": [
+    {
+      "entity": "string",
+      "event_type": "string",
+      "location": "string",
+      "status": "string",
+      "reason": "string"
+    }
+  ],
+  "problem_entities": ["string"],
+  "problem_locations": ["string"]
+}
+
+Rules:
+- Return valid JSON only.
+- Do not include markdown.
+- "abnormal_events" should contain events that look problematic, unusual, delayed, failed, blocked, missing, or suspicious.
+- "problem_entities" should list repeated or notable problematic entities.
+- "problem_locations" should list repeated or notable problematic locations.
+- If there are no abnormal events, return an empty list.
+"""
+
+FILTER_SCHEMA_TEXT = """
+Return valid JSON only, with this exact top-level structure:
+
+{
+  "mode": "all" OR "filter",
+  "filter": {}
+}
+
+Rules:
+- Return valid JSON only.
+- Do not include markdown.
+- Allowed filter keys: timestamp, entity, event_type, location, status, note
+- Filter values must be strings.
+- Use mode = "all" only if the user clearly wants all events.
+- Use mode = "filter" when the user is asking about a subset.
+- The filter object may contain one or more key/value pairs.
+"""
+
+PLAN_SCHEMA_TEXT = """
+Return valid JSON only, with this exact top-level structure:
+
+{
+  "steps": [
+    {
+      "step_id": "s1",
+      "action": "query",
+      "filter_mode": "all" OR "filter",
+      "filter": {}
+    },
+    {
+      "step_id": "s2",
+      "action": "query",
+      "filter_mode": "all" OR "filter",
+      "filter": {}
+    },
+    {
+      "step_id": "s3",
+      "action": "compare",
+      "inputs": ["s1", "s2"]
+    }
+  ]
+}
+
+Rules:
+- Return valid JSON only.
+- Do not include markdown.
+- Allowed actions: "query", "compare"
+- step_id must be sequential: s1, s2, s3, ...
+- A query step must contain:
+  - step_id
+  - action = "query"
+  - filter_mode = "all" or "filter"
+  - filter = {} for all, or one/more allowed key/value pairs for filter
+- A compare step must contain:
+  - step_id
+  - action = "compare"
+  - inputs = ["prior_query_step_id_1", "prior_query_step_id_2"]
+- Allowed filter keys: timestamp, entity, event_type, location, status, note
+- Filter values must be strings
+- Use compare only when the user clearly asks for comparison between two subsets
+- If the user asks for one subset only, return one query step and no compare step
+
+Examples:
+
+User: Compare delayed shipments in Taipei vs blocked shipments in Tainan
+Return:
+{
+  "steps": [
+    {
+      "step_id": "s1",
+      "action": "query",
+      "filter_mode": "filter",
+      "filter": {"status":"delayed","location":"taipei"}
+    },
+    {
+      "step_id": "s2",
+      "action": "query",
+      "filter_mode": "filter",
+      "filter": {"status":"blocked","location":"tainan"}
+    },
+    {
+      "step_id": "s3",
+      "action": "compare",
+      "inputs": ["s1","s2"]
+    }
+  ]
+}
+
+User: Analyze truck_17
+Return:
+{
+  "steps": [
+    {
+      "step_id": "s1",
+      "action": "query",
+      "filter_mode": "filter",
+      "filter": {"entity":"truck_17"}
+    }
+  ]
+}
+"""
+
+COMPARE_SCHEMA_TEXT = """
+Return valid JSON only, with this exact top-level structure:
+
+{
+  "summary": "short comparison summary",
+  "subset_a": {
+    "label": "string",
+    "count": 0,
+    "problem_entities": ["string"],
+    "problem_locations": ["string"]
+  },
+  "subset_b": {
+    "label": "string",
+    "count": 0,
+    "problem_entities": ["string"],
+    "problem_locations": ["string"]
+  },
+  "differences": [
+    "string"
+  ]
+}
+
+Rules:
+- Return valid JSON only.
+- Do not include markdown.
+- Compare the two subsets based on event count, abnormal patterns, entities, and locations.
+- "differences" should be a short list of concrete differences.
+"""
+
+# --------------------------------------------------
+# 2 HELPERS
+# --------------------------------------------------
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+ 
+# --- MONGO 03 ---
+def load_events() -> List[Dict[str, Any]]:
+    events = list(events_collection.find({}, {"_id": 0}))
+    return events
+# ----------------
+    
+def validate_event(event: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+
+    if not isinstance(event, dict):
+        return ["Event must be a JSON object."]
+
+    for key in REQUIRED_KEYS:
+        if key not in event:
+            errors.append(f"Missing required key: '{key}'.")
+
+    for key in event.keys():
+        if key not in ALLOWED_TOP_KEYS:
+            errors.append(f"Unexpected key: '{key}'.")
+
+    for key in REQUIRED_KEYS:
+        if key in event and not isinstance(event[key], str):
+            errors.append(f"'{key}' must be a string.")
+
+    if "timestamp" in event and not isinstance(event["timestamp"], str):
+        errors.append("'timestamp' must be a string.")
+
+    return errors
+
+def normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(event)
+    if "timestamp" not in out:
+        out["timestamp"] = utc_now_iso()
+    return out
+
+def validate_query_filter(query_filter: Dict[str, Any], allow_empty: bool = False) -> List[str]:
+    errors: List[str] = []
+
+    if not isinstance(query_filter, dict):
+        return ["Query filter must be a JSON object."]
+
+    if not allow_empty and len(query_filter) == 0:
+        errors.append("Query filter must not be empty.")
+
+    for key, value in query_filter.items():
+        if key not in QUERYABLE_KEYS:
+            errors.append(f"Query key '{key}' is not allowed.")
+        if not isinstance(value, str):
+            errors.append(f"Query value for '{key}' must be a string.")
+
+    return errors
+
+def event_matches_filter(event: Dict[str, Any], query_filter: Dict[str, str]) -> bool:
+    for key, wanted_value in query_filter.items():
+        actual_value = event.get(key)
+        if not isinstance(actual_value, str):
+            return False
+        if actual_value.lower() != wanted_value.lower():
+            return False
+    return True
+
+def select_matching_events(events: List[Dict[str, Any]], query_filter: Dict[str, str]) -> List[Dict[str, Any]]:
+    return [event for event in events if event_matches_filter(event, query_filter)]
+
+def print_usage() -> None:
+    print(
+        "Usage:\n"
+        "  python pal_v7_patterns.py ingest_file <path_to_jsonl>\n"
+        "  python pal_v7_patterns.py ingest '<json_event>'\n"
+        "  python pal_v7_patterns.py analyze\n"
+        "  python pal_v7_patterns.py query '<json_filter>'\n"
+        "  python pal_v7_patterns.py ask '<natural language query>'\n"
+        "  python pal_v7_patterns.py plan '<natural language analysis request>'\n\n"
+        "Bash examples:\n"
+        '  python pal_v7_patterns.py ingest \'{"entity":"truck_17","event_type":"shipment","location":"taipei","status":"delayed","note":"flat tire"}\'\n'
+        '  python pal_v7_patterns.py ask "show delayed events in taipei"\n'
+        '  python pal_v7_patterns.py plan "Compare delayed shipments in Taipei vs blocked shipments in Tainan"\n'
+        '  python pal_v7_patterns.py plan "Compare truck_17 with truck_22"\n'
+    )
+
+def print_events_block(title: str, events: List[Dict[str, Any]]) -> None:
+    print(title)
+    print(json.dumps(events, indent=2, ensure_ascii=False))
+
+def no_events_error() -> Dict[str, Any]:
+    return {"ok": False, "error": "No events stored yet."}
+
+# --------------------------------------------------
+# 3 LLM CALLS
+# --------------------------------------------------
+def build_analysis_messages(events: List[Dict[str, Any]], context_label: str) -> List[Dict[str, str]]:
+    events_json = json.dumps(events, indent=2, ensure_ascii=False)
+    return [
+        {"role": "system", "content": "You are a structured data analysis model.\n\n" + ANALYSIS_SCHEMA_TEXT},
+        {"role": "user", "content": f"Analyze the following stored events.\nContext: {context_label}\n\n{events_json}"},
+    ]
+
+def request_analysis(events: List[Dict[str, Any]], context_label: str) -> Dict[str, Any]:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=build_analysis_messages(events, context_label),
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)
+
+def build_filter_messages(user_query: str) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": "You convert natural language queries into structured event filters.\n\n" + FILTER_SCHEMA_TEXT},
+        {"role": "user", "content": user_query},
+    ]
+
+def request_structured_filter(user_query: str) -> Dict[str, Any]:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=build_filter_messages(user_query),
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)
+
+def build_plan_messages(user_request: str) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": "You convert natural language analysis requests into multi-step plan JSON.\n\n" + PLAN_SCHEMA_TEXT},
+        {"role": "user", "content": user_request},
+    ]
+
+def request_plan(user_request: str) -> Dict[str, Any]:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=build_plan_messages(user_request),
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)
+
+def build_compare_messages(
+    user_request: str,
+    subset_a_label: str,
+    subset_a_events: List[Dict[str, Any]],
+    subset_a_analysis: Dict[str, Any],
+    subset_b_label: str,
+    subset_b_events: List[Dict[str, Any]],
+    subset_b_analysis: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    payload = {
+        "user_request": user_request,
+        "subset_a": {
+            "label": subset_a_label,
+            "events": subset_a_events,
+            "analysis": subset_a_analysis,
+        },
+        "subset_b": {
+            "label": subset_b_label,
+            "events": subset_b_events,
+            "analysis": subset_b_analysis,
+        },
+    }
+    return [
+        {"role": "system", "content": "You compare two analyzed subsets of events.\n\n" + COMPARE_SCHEMA_TEXT},
+        {"role": "user", "content": json.dumps(payload, indent=2, ensure_ascii=False)},
+    ]
+
+def request_compare(
+    user_request: str,
+    subset_a_label: str,
+    subset_a_events: List[Dict[str, Any]],
+    subset_a_analysis: Dict[str, Any],
+    subset_b_label: str,
+    subset_b_events: List[Dict[str, Any]],
+    subset_b_analysis: Dict[str, Any],
+) -> Dict[str, Any]:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=build_compare_messages(
+            user_request,
+            subset_a_label, subset_a_events, subset_a_analysis,
+            subset_b_label, subset_b_events, subset_b_analysis,
+        ),
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)
+
+# --------------------------------------------------
+# 4 VALIDATORS
+# --------------------------------------------------
+def validate_filter_request(obj: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+
+    if not isinstance(obj, dict):
+        return ["Filter request must be a JSON object."]
+
+    if "mode" not in obj:
+        errors.append("Missing required key: 'mode'.")
+    if "filter" not in obj:
+        errors.append("Missing required key: 'filter'.")
+
+    mode = obj.get("mode")
+    filter_obj = obj.get("filter")
+
+    if mode not in {"all", "filter"}:
+        errors.append("mode must be 'all' or 'filter'.")
+
+    if not isinstance(filter_obj, dict):
+        errors.append("filter must be a JSON object.")
+    else:
+        for key, value in filter_obj.items():
+            if key not in QUERYABLE_KEYS:
+                errors.append(f"Filter key '{key}' is not allowed.")
+            if not isinstance(value, str):
+                errors.append(f"Filter value for '{key}' must be a string.")
+
+    if mode == "filter" and isinstance(filter_obj, dict) and len(filter_obj) == 0:
+        errors.append("filter must not be empty when mode='filter'.")
+
+    if mode == "all" and isinstance(filter_obj, dict) and len(filter_obj) != 0:
+        errors.append("filter must be empty when mode='all'.")
+
+    return errors
+
+def validate_plan(plan: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+
+    if not isinstance(plan, dict):
+        return ["Plan must be a JSON object."]
+
+    steps = plan.get("steps")
+    if not isinstance(steps, list) or len(steps) == 0:
+        return ["Plan must contain non-empty 'steps' list."]
+
+    seen_step_ids = set()
+    prior_query_steps = []
+
+    for idx, step in enumerate(steps, start=1):
+        expected_id = f"s{idx}"
+        if not isinstance(step, dict):
+            errors.append(f"steps[{idx-1}] must be an object.")
+            continue
+
+        step_id = step.get("step_id")
+        action = step.get("action")
+
+        if step_id != expected_id:
+            errors.append(f"steps[{idx-1}].step_id must be '{expected_id}'.")
+        if step_id in seen_step_ids:
+            errors.append(f"Duplicate step_id '{step_id}'.")
+        if isinstance(step_id, str):
+            seen_step_ids.add(step_id)
+
+        if action not in {"query", "compare"}:
+            errors.append(f"steps[{idx-1}].action must be 'query' or 'compare'.")
+            continue
+
+        if action == "query":
+            filter_mode = step.get("filter_mode")
+            filter_obj = step.get("filter")
+
+            if filter_mode not in {"all", "filter"}:
+                errors.append(f"{step_id}.filter_mode must be 'all' or 'filter'.")
+            if not isinstance(filter_obj, dict):
+                errors.append(f"{step_id}.filter must be a JSON object.")
+            else:
+                if filter_mode == "all" and len(filter_obj) != 0:
+                    errors.append(f"{step_id}.filter must be empty when filter_mode='all'.")
+                if filter_mode == "filter" and len(filter_obj) == 0:
+                    errors.append(f"{step_id}.filter must not be empty when filter_mode='filter'.")
+                errors.extend([f"{step_id}: {e}" for e in validate_query_filter(filter_obj, allow_empty=True)])
+
+            prior_query_steps.append(step_id)
+
+        if action == "compare":
+            inputs = step.get("inputs")
+            if not isinstance(inputs, list) or len(inputs) != 2:
+                errors.append(f"{step_id}.inputs must be a list of two query step ids.")
+            else:
+                for ref in inputs:
+                    if not isinstance(ref, str):
+                        errors.append(f"{step_id}.inputs must contain strings only.")
+                    elif ref not in prior_query_steps:
+                        errors.append(f"{step_id}.inputs contains invalid or non-prior query step id '{ref}'.")
+
+    return errors
+
+# --------------------------------------------------
+# 5 CORE EXECUTION HELPERS
+# --------------------------------------------------
+def run_query_filter_core(events: List[Dict[str, Any]], query_filter: Dict[str, str]) -> List[Dict[str, Any]]:
+    return select_matching_events(events, query_filter)
+
+def run_query_step(events: List[Dict[str, Any]], filter_mode: str, filter_obj: Dict[str, str]) -> List[Dict[str, Any]]:
+    if filter_mode == "all":
+        return list(events)
+    return run_query_filter_core(events, filter_obj)
+
+# --------------------------------------------------
+# 6 COMMANDS
+# --------------------------------------------------
+
+# --- CLEANUP 02: CLI wrapper uses run_ingest ---
+def cmd_ingest(event_json_text: str) -> None:
+    try:
+        event = json.loads(event_json_text)
+    except Exception as e:
+        print("INGEST FAILED")
+        print(f"Invalid JSON input: {e}")
+        return
+
+    result = run_ingest(event)
+
+    if not result["ok"]:
+        print("INGEST FAILED")
+        for err in result["errors"]:
+            print(f"- {err}")
+        return
+
+    print("INGEST OK")
+    print(f"Saved to: MongoDB collection '{COLLECTION_NAME}' in database '{DB_NAME}'")
+    print("Event:")
+    print(json.dumps(result["event"], indent=2, ensure_ascii=False))
+# ------------------------------------------------
+
+
+def cmd_analyze() -> None:
+    events = load_events()
+    if not events:
+        print("ANALYZE FAILED")
+        print("No events stored yet.")
+        # return
+        return no_events_error()
+
+    print_events_block("=== STORED EVENTS (ALL) ===", events)
+
+    try:
+        analysis = request_analysis(events, context_label="all events")
+    except Exception as e:
+        print("ANALYZE FAILED")
+        print(str(e))
+        return
+
+    print("\n=== ANALYSIS (ALL) ===")
+    print(json.dumps(analysis, indent=2, ensure_ascii=False))
+
+def run_query_filter(query_filter: Dict[str, str]) -> None:
+    errors = validate_query_filter(query_filter)
+    if errors:
+        print("QUERY FAILED")
+        for err in errors:
+            print(f"- {err}")
+        return
+
+    events = load_events()
+    if not events:
+        print("QUERY FAILED")
+        print("No events stored yet.")
+        # return
+        return no_events_error()
+
+    matching_events = run_query_filter_core(events, query_filter)
+
+    print("=== QUERY FILTER ===")
+    print(json.dumps(query_filter, indent=2, ensure_ascii=False))
+    print(f"\n=== MATCH COUNT ===\n{len(matching_events)}")
+
+    if not matching_events:
+        print("\n=== MATCHING EVENTS ===")
+        print("[]")
+        return
+
+    print_events_block("\n=== MATCHING EVENTS ===", matching_events)
+
+    try:
+        analysis = request_analysis(matching_events, context_label=f"query filter = {json.dumps(query_filter, ensure_ascii=False)}")
+    except Exception as e:
+        print("QUERY FAILED")
+        print(str(e))
+        return
+
+    print("\n=== ANALYSIS (MATCHING EVENTS ONLY) ===")
+    print(json.dumps(analysis, indent=2, ensure_ascii=False))
+
+def cmd_query(query_json_text: str) -> None:
+    try:
+        query_filter = json.loads(query_json_text)
+    except Exception as e:
+        print("QUERY FAILED")
+        print(f"Invalid JSON filter: {e}")
+        return
+    # run_query_filter(query_filter)
+    return run_query_filter(query_filter)
+
+def cmd_ask(user_query: str) -> None:
+    events = load_events()
+    if not events:
+        print("ASK FAILED")
+        print("No events stored yet.")
+        # return
+        return no_events_error()
+
+    print("=== NATURAL LANGUAGE QUERY ===")
+    print(user_query)
+
+    try:
+        filter_request = request_structured_filter(user_query)
+    except Exception as e:
+        print("ASK FAILED")
+        print(f"Filter generation failed: {e}")
+        return
+
+    print("\n=== GENERATED FILTER REQUEST ===")
+    print(json.dumps(filter_request, indent=2, ensure_ascii=False))
+
+    errors = validate_filter_request(filter_request)
+    if errors:
+        print("\nASK FAILED")
+        for err in errors:
+            print(f"- {err}")
+        return
+
+    mode = filter_request["mode"]
+    filter_obj = filter_request["filter"]
+
+    print("\n=== MODE ===")
+    print(mode)
+
+    if mode == "all":
+        # cmd_analyze()
+        return cmd_analyze()
+    else:
+        # run_query_filter(filter_obj)
+        return run_query_filter(filter_obj)
+
+# --- API FIX 01: make cmd_plan always return JSON-safe dict ---
+def cmd_plan(user_request: str) -> Dict[str, Any]:
+    events = load_events()
+    if not events:
+        print("PLAN FAILED")
+        print("No events stored yet.")
+        return no_events_error()
+
+    print("=== NATURAL LANGUAGE ANALYSIS REQUEST ===")
+    print(user_request)
+
+    try:
+        plan = request_plan(user_request)
+    except Exception as e:
+        print("PLAN FAILED")
+        print(f"Plan generation failed: {e}")
+        return {"ok": False, "error": f"Plan generation failed: {e}"}
+
+    print("\n=== GENERATED PLAN ===")
+    print(json.dumps(plan, indent=2, ensure_ascii=False))
+
+    errors = validate_plan(plan)
+    if errors:
+        print("\nPLAN FAILED")
+        for err in errors:
+            print(f"- {err}")
+        return {"ok": False, "error": " ; ".join(errors), "plan": plan}
+
+    step_outputs: Dict[str, Dict[str, Any]] = {}
+
+    for step in plan["steps"]:
+        step_id = step["step_id"]
+        action = step["action"]
+
+        print(f"\n=== EXECUTING {step_id} ({action}) ===")
+
+        if action == "query":
+            filter_mode = step["filter_mode"]
+            filter_obj = step["filter"]
+            matched = run_query_step(events, filter_mode, filter_obj)
+
+            print(f"filter_mode: {filter_mode}")
+            print("filter:")
+            print(json.dumps(filter_obj, indent=2, ensure_ascii=False))
+            print(f"match_count: {len(matched)}")
+            print("matched_events:")
+            print(json.dumps(matched, indent=2, ensure_ascii=False))
+
+            try:
+                analysis = request_analysis(
+                    matched,
+                    context_label=f"plan step {step_id}, filter_mode={filter_mode}, filter={json.dumps(filter_obj, ensure_ascii=False)}"
+                ) if matched else {
+                    "summary": "No matching events.",
+                    "abnormal_events": [],
+                    "problem_entities": [],
+                    "problem_locations": []
+                }
+            except Exception as e:
+                print("PLAN FAILED")
+                print(f"Analysis failed in {step_id}: {e}")
+                return {"ok": False, "error": f"Analysis failed in {step_id}: {e}", "step_id": step_id}
+
+            print("analysis:")
+            print(json.dumps(analysis, indent=2, ensure_ascii=False))
+
+            step_outputs[step_id] = {
+                "action": "query",
+                "filter_mode": filter_mode,
+                "filter": filter_obj,
+                "events": matched,
+                "analysis": analysis,
+            }
+
+        elif action == "compare":
+            s_a, s_b = step["inputs"]
+            out_a = step_outputs[s_a]
+            out_b = step_outputs[s_b]
+
+            label_a = f"{s_a}:{json.dumps(out_a['filter'], ensure_ascii=False)}" if out_a["filter_mode"] == "filter" else f"{s_a}:all"
+            label_b = f"{s_b}:{json.dumps(out_b['filter'], ensure_ascii=False)}" if out_b["filter_mode"] == "filter" else f"{s_b}:all"
+
+            try:
+                comparison = request_compare(
+                    user_request=user_request,
+                    subset_a_label=label_a,
+                    subset_a_events=out_a["events"],
+                    subset_a_analysis=out_a["analysis"],
+                    subset_b_label=label_b,
+                    subset_b_events=out_b["events"],
+                    subset_b_analysis=out_b["analysis"],
+                )
+            except Exception as e:
+                print("PLAN FAILED")
+                print(f"Compare failed in {step_id}: {e}")
+                return {"ok": False, "error": f"Compare failed in {step_id}: {e}", "step_id": step_id}
+
+            print("compare_inputs:")
+            print(json.dumps(step["inputs"], indent=2, ensure_ascii=False))
+            print("comparison:")
+            print(json.dumps(comparison, indent=2, ensure_ascii=False))
+
+            step_outputs[step_id] = {
+                "action": "compare",
+                "inputs": step["inputs"],
+                "comparison": comparison,
+            }
+
+    return {"ok": True, "result": step_outputs}
+
+# --- S2B 01: derived recurring problems ---
+def find_recurring_problem_entities(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    bad_statuses = {"delayed", "blocked"}
+    counts: Dict[str, int] = {}
+
+    for event in events:
+        entity = event.get("entity")
+        status = event.get("status")
+        if isinstance(entity, str) and isinstance(status, str) and status.lower() in bad_statuses:
+            counts[entity] = counts.get(entity, 0) + 1
+
+    recurring = []
+    for entity, count in counts.items():
+        if count >= 2:
+            recurring.append({"entity": entity, "problem_count": count})
+
+    recurring.sort(key=lambda x: x["problem_count"], reverse=True)
+
+    return {
+        "ok": True,
+        "recurring_problem_entities": recurring
+    }
+# ------------------------------------------
+
+# --- S2B 02 ---
+def run_recurring_problems() -> Dict[str, Any]:
+    events = load_events()
+    if not events:
+        return no_events_error()
+    return find_recurring_problem_entities(events)
+# ----------------
+
+# --- S2B 04: derived problem locations ---
+def find_problem_locations(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    bad_statuses = {"delayed", "blocked"}
+    counts: Dict[str, int] = {}
+
+    for event in events:
+        location = event.get("location")
+        status = event.get("status")
+        if isinstance(location, str) and isinstance(status, str) and status.lower() in bad_statuses:
+            counts[location] = counts.get(location, 0) + 1
+
+    problem_locations = []
+    for location, count in counts.items():
+        problem_locations.append({"location": location, "problem_count": count})
+
+    problem_locations.sort(key=lambda x: x["problem_count"], reverse=True)
+
+    return {
+        "ok": True,
+        "problem_locations": problem_locations
+    }
+# -----------------------------------------
+
+
+# --- S2B 05: derived status summary ---
+def get_status_summary(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    counts: Dict[str, int] = {}
+
+    for event in events:
+        status = event.get("status")
+        if isinstance(status, str):
+            key = status.lower()
+            counts[key] = counts.get(key, 0) + 1
+
+    summary = []
+    for status, count in counts.items():
+        summary.append({"status": status, "count": count})
+
+    summary.sort(key=lambda x: x["count"], reverse=True)
+
+    return {
+        "ok": True,
+        "status_summary": summary
+    }
+# --------------------------------------
+
+# --- S2B 06 ---
+def run_problem_locations() -> Dict[str, Any]:
+    events = load_events()
+    if not events:
+        return no_events_error()
+    return find_problem_locations(events)
+
+
+def run_status_summary() -> Dict[str, Any]:
+    events = load_events()
+    if not events:
+        return no_events_error()
+    return get_status_summary(events)
+# ----------------
+
+# --- S4 01: delete by filter ---
+def delete_events(filter_dict: Dict[str, Any]) -> Dict[str, Any]:
+    if not filter_dict:
+        return {"ok": False, "error": "Empty filter not allowed"}
+
+    result = events_collection.delete_many(filter_dict)
+
+    return {
+        "ok": True,
+        "deleted_count": result.deleted_count,
+        "filter": filter_dict
+    }
+# --------------------------------
+
+def run_delete(filter_dict: Dict[str, Any]) -> Dict[str, Any]:
+    return delete_events(filter_dict)
+
+#166 ##############################################################
+
+#166
+def _status_score(status: str) -> int:
+    if not status:
+        return 0
+    return STATUS_SCORES.get(str(status).strip().lower(), 0)
+
+
+#166
+def _build_reason(status_counts: dict, recurring: bool) -> str:
+    parts = []
+
+    for key in ["blocked", "delayed", "warning", "ok"]:
+        count = status_counts.get(key, 0)
+        if count > 0:
+            parts.append(f"{count} {key}")
+
+    if recurring:
+        parts.append("recurring")
+
+    if not parts:
+        return "no issues"
+
+    return ", ".join(parts)
+
+
+#166
+def rank_priority(events: list[dict]) -> dict:
+    entity_stats = defaultdict(lambda: {
+        "event_count": 0,
+        "score": 0,
+        "status_counts": defaultdict(int),
+    })
+
+    location_stats = defaultdict(lambda: {
+        "event_count": 0,
+        "score": 0,
+        "status_counts": defaultdict(int),
+    })
+
+    for ev in events:
+        entity = str(ev.get("entity", "unknown")).strip() or "unknown"
+        location = str(ev.get("location", "unknown")).strip() or "unknown"
+        status = str(ev.get("status", "")).strip().lower()
+
+        s = _status_score(status)
+
+        # entity aggregation
+        entity_stats[entity]["event_count"] += 1
+        entity_stats[entity]["score"] += s
+        if status:
+            entity_stats[entity]["status_counts"][status] += 1
+
+        # location aggregation
+        location_stats[location]["event_count"] += 1
+        location_stats[location]["score"] += s
+        if status:
+            location_stats[location]["status_counts"][status] += 1
+
+    entity_ranking = []
+    for entity, st in entity_stats.items():
+        recurring = st["event_count"] > 1
+        final_score = st["score"] + (RECURRING_BONUS if recurring else 0)
+        status_counts = dict(st["status_counts"])
+
+        entity_ranking.append({
+            "entity": entity,
+            "score": final_score,
+            "event_count": st["event_count"],
+            "status_counts": status_counts,
+            "reason": _build_reason(status_counts, recurring),
+        })
+
+    location_ranking = []
+    for location, st in location_stats.items():
+        recurring = st["event_count"] > 1
+        final_score = st["score"] + (RECURRING_BONUS if recurring else 0)
+        status_counts = dict(st["status_counts"])
+
+        location_ranking.append({
+            "location": location,
+            "score": final_score,
+            "event_count": st["event_count"],
+            "status_counts": status_counts,
+            "reason": _build_reason(status_counts, recurring),
+        })
+
+    entity_ranking.sort(key=lambda x: (-x["score"], -x["event_count"], x["entity"]))
+    location_ranking.sort(key=lambda x: (-x["score"], -x["event_count"], x["location"]))
+
+    return {
+        "ok": True,
+        "matched_count": len(events),
+        "entity_ranking": entity_ranking,
+        "location_ranking": location_ranking,
+    }
+
+
+#166
+def _match_filter(ev: dict, filter_dict: dict) -> bool:
+    for k, v in filter_dict.items():
+        if ev.get(k) != v:
+            return False
+    return True
+
+
+#166
+def run_priority_rank(filter_dict: dict) -> dict:
+    events = load_events()
+
+    if filter_dict:
+        events = [ev for ev in events if _match_filter(ev, filter_dict)]
+
+    result = rank_priority(events)
+    result["filter_used"] = filter_dict
+    return result
+
+#######################################################
+# PAL_v7b
+#######################################################
+
+#168 
+
+def _build_entity_summary(entity: str, event_count: int, status_counts: dict, locations_seen: list[str]) -> str:
+    parts = [f"{entity} has {event_count} event(s)"]
+
+    status_parts = []
+    for key in ["blocked", "delayed", "warning", "ok"]:
+        count = status_counts.get(key, 0)
+        if count > 0:
+            status_parts.append(f"{count} {key}")
+
+    if status_parts:
+        parts.append("statuses: " + ", ".join(status_parts))
+
+    if locations_seen:
+        parts.append("locations: " + ", ".join(locations_seen))
+
+    if event_count > 1:
+        parts.append("recurring issue")
+
+    return " | ".join(parts)
+
+
+def run_entity_history(entity: str) -> dict:
+    entity = (entity or "").strip()
+    if not entity:
+        return {
+            "ok": False,
+            "error": "entity is required"
+        }
+
+    events = load_events()
+    matched = [ev for ev in events if str(ev.get("entity", "")).strip() == entity]
+
+    status_counts = defaultdict(int)
+    locations_seen_set = set()
+
+    for ev in matched:
+        status = str(ev.get("status", "")).strip().lower()
+        location = str(ev.get("location", "")).strip()
+
+        if status:
+            status_counts[status] += 1
+        if location:
+            locations_seen_set.add(location)
+
+    locations_seen = sorted(locations_seen_set)
+
+    return {
+        "ok": True,
+        "entity": entity,
+        "matched_count": len(matched),
+        "recurring": len(matched) > 1,
+        "status_counts": dict(status_counts),
+        "locations_seen": locations_seen,
+        "summary": _build_entity_summary(
+            entity=entity,
+            event_count=len(matched),
+            status_counts=dict(status_counts),
+            locations_seen=locations_seen,
+        ),
+        "events": matched,
+    }
+
+#######################################################
+# PAL_v7c
+#######################################################
+
+#170
+
+def _match_filter(ev: dict, filter_dict: dict) -> bool:
+    for k, v in filter_dict.items():
+        if ev.get(k) != v:
+            return False
+    return True
+
+
+def _status_counts(events: list[dict]) -> dict:
+    counts = defaultdict(int)
+    for ev in events:
+        status = str(ev.get("status", "")).strip().lower()
+        if status:
+            counts[status] += 1
+    return dict(counts)
+
+
+def _top_entities(events: list[dict], top_n: int = 5) -> list[dict]:
+    stats = defaultdict(lambda: {
+        "event_count": 0,
+        "status_counts": defaultdict(int),
+    })
+
+    for ev in events:
+        entity = str(ev.get("entity", "unknown")).strip() or "unknown"
+        status = str(ev.get("status", "")).strip().lower()
+
+        stats[entity]["event_count"] += 1
+        if status:
+            stats[entity]["status_counts"][status] += 1
+
+    rows = []
+    for entity, st in stats.items():
+        rows.append({
+            "entity": entity,
+            "event_count": st["event_count"],
+            "status_counts": dict(st["status_counts"]),
+        })
+
+    rows.sort(key=lambda x: (-x["event_count"], x["entity"]))
+    return rows[:top_n]
+
+
+def _compare_summary(filter_a: dict, filter_b: dict, events_a: list[dict], events_b: list[dict]) -> str:
+    count_a = len(events_a)
+    count_b = len(events_b)
+
+    statuses_a = _status_counts(events_a)
+    statuses_b = _status_counts(events_b)
+
+    blocked_a = statuses_a.get("blocked", 0)
+    blocked_b = statuses_b.get("blocked", 0)
+    delayed_a = statuses_a.get("delayed", 0)
+    delayed_b = statuses_b.get("delayed", 0)
+
+    name_a = str(filter_a)
+    name_b = str(filter_b)
+
+    parts = []
+
+    if count_a > count_b:
+        parts.append(f"A has more events than B ({count_a} vs {count_b})")
+    elif count_b > count_a:
+        parts.append(f"B has more events than A ({count_b} vs {count_a})")
+    else:
+        parts.append(f"A and B have the same number of events ({count_a})")
+
+    if blocked_a > blocked_b:
+        parts.append(f"A has more blocked events ({blocked_a} vs {blocked_b})")
+    elif blocked_b > blocked_a:
+        parts.append(f"B has more blocked events ({blocked_b} vs {blocked_a})")
+
+    if delayed_a > delayed_b:
+        parts.append(f"A has more delayed events ({delayed_a} vs {delayed_b})")
+    elif delayed_b > delayed_a:
+        parts.append(f"B has more delayed events ({delayed_b} vs {delayed_a})")
+
+    if not parts:
+        parts.append(f"No major difference detected between {name_a} and {name_b}")
+
+    return " | ".join(parts)
+
+
+def run_compare_filters(filter_a: dict, filter_b: dict) -> dict:
+    events = load_events()
+
+    matched_a = [ev for ev in events if _match_filter(ev, filter_a)]
+    matched_b = [ev for ev in events if _match_filter(ev, filter_b)]
+
+    result = {
+        "ok": True,
+        "filter_a": filter_a,
+        "filter_b": filter_b,
+        "a": {
+            "matched_count": len(matched_a),
+            "status_counts": _status_counts(matched_a),
+            "top_entities": _top_entities(matched_a),
+        },
+        "b": {
+            "matched_count": len(matched_b),
+            "status_counts": _status_counts(matched_b),
+            "top_entities": _top_entities(matched_b),
+        },
+        "summary": _compare_summary(filter_a, filter_b, matched_a, matched_b),
+    }
+
+    return result
+
+
+#######################################################
+# PAL_v7c
+#######################################################
+
+#172
+
+def _llm_explain_compare(compare_result: dict) -> str:
+    """
+    LLM only explains deterministic compare result.
+    It must not invent facts.
+    """
+    system_prompt = (
+        "You are summarizing operational event analysis.\n"
+        "Use only the facts provided.\n"
+        "Do not invent counts, entities, locations, causes, or trends.\n"
+        "If the evidence is limited, say so.\n"
+        "Keep the answer short, practical, and clear.\n"
+        "Prefer 4-6 sentences."
+    )
+
+    user_prompt = (
+        "Explain this comparison result for an operations user.\n\n"
+        "Structured result:\n"
+        f"{json.dumps(compare_result, indent=2)}\n\n"
+        "Write a short explanation with:\n"
+        "1. main difference\n"
+        "2. riskier side\n"
+        "3. notable entities if present\n"
+        "4. one practical next check\n"
+    )
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+
+    return resp.choices[0].message.content.strip()
+
+
+def run_compare_filters_explain(filter_a: dict, filter_b: dict) -> dict:
+    """
+    Deterministic compare first, then LLM explanation.
+    """
+    compare_result = run_compare_filters(filter_a, filter_b)
+
+    try:
+        llm_summary = _llm_explain_compare(compare_result)
+    except Exception as e:
+        llm_summary = f"LLM summary unavailable: {str(e)}"
+
+    return {
+        "ok": True,
+        "filter_a": filter_a,
+        "filter_b": filter_b,
+        "deterministic_result": compare_result,
+        "llm_summary": llm_summary,
+    }
+
+
+
+# --------------------------------------------------
+# 7 MAIN
+# --------------------------------------------------
+def main() -> None:
+    if len(sys.argv) < 2:
+        print_usage()
+        return
+
+    command = sys.argv[1].strip().lower()
+
+    if command == "ingest":
+        if len(sys.argv) < 3:
+            print("Missing JSON event for ingest.\n")
+            print_usage()
+            return
+        cmd_ingest(sys.argv[2])
+
+    elif command == "analyze":
+        cmd_analyze()
+
+    elif command == "query":
+        if len(sys.argv) < 3:
+            print("Missing JSON filter for query.\n")
+            print_usage()
+            return
+        cmd_query(sys.argv[2])
+
+    elif command == "ask":
+        if len(sys.argv) < 3:
+            print("Missing natural language query for ask.\n")
+            print_usage()
+            return
+        cmd_ask(sys.argv[2])
+
+    elif command == "plan":
+        if len(sys.argv) < 3:
+            print("Missing natural language analysis request for plan.\n")
+            print_usage()
+            return
+        cmd_plan(sys.argv[2])
+
+    ############## pal_v6_file_ingest.py specific ##############
+    elif command == "ingest_file":
+        if len(sys.argv) < 3:
+            print("Missing file path for ingest_file.\n")
+            print_usage()
+            return
+        result = run_ingest_file(sys.argv[2])
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    else:
+        print(f"Unknown command: {command}\n")
+        print_usage()
+
+if __name__ == "__main__":
+    main()
+    
+
+# --- API FIX 02: simple wrapper ---
+def run_plan(prompt: str):
+    return cmd_plan(prompt)

@@ -9,11 +9,9 @@ import os
 # from pal_v4 import run_plan, run_ingest
 # --- FIX: use Mongo version ---
 #from pal_v5_mongo import run_plan, run_ingest
-from pal_v7_patterns import (
+from pal_v6_file_ingest import (
     load_events, run_plan, run_ingest, run_recurring_problems, 
-    run_problem_locations, run_status_summary, run_delete,
-    run_priority_rank, run_entity_history, run_compare_filters,
-    run_compare_filters_explain
+    run_problem_locations, run_status_summary, run_delete
 )
 # --------------------------------
 
@@ -92,42 +90,4 @@ def delete(req: DeleteRequest, x_api_key: str = Header(default="")):
     check_api_key(x_api_key)
     return run_delete(req.filter)
 # ----------------
-
-#166 
-class PriorityRankRequest(BaseModel):
-    filter: dict = {}
-
-#166 
-@app.post("/priority_rank")
-def priority_rank(req: PriorityRankRequest, x_api_key: str = Header(default="")):
-    check_api_key(x_api_key)
-    return run_priority_rank(req.filter)
-
-
-#168 
-class EntityHistoryRequest(BaseModel):
-    entity: str
-
-@app.post("/entity_history")
-def entity_history(req: EntityHistoryRequest, x_api_key: str = Header(default="")):
-    check_api_key(x_api_key)
-    return run_entity_history(req.entity)
-
-#170 
-class CompareFiltersRequest(BaseModel):
-    filter_a: dict = {}
-    filter_b: dict = {}
-
-@app.post("/compare_filters")
-def compare_filters(req: CompareFiltersRequest, x_api_key: str = Header(default="")):
-    check_api_key(x_api_key)
-    return run_compare_filters(req.filter_a, req.filter_b)
-
-#172 
-
-@app.post("/compare_filters_explain")
-def compare_filters_explain(req: CompareFiltersRequest, x_api_key: str = Header(default="")):
-    check_api_key(x_api_key)
-    return run_compare_filters_explain(req.filter_a, req.filter_b)
-
 
