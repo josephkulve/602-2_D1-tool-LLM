@@ -1,0 +1,345 @@
+{
+  "entities": [
+    {
+      "id": "supplier_1",
+      "type": "supplier",
+      "name": "Supplier 1"
+    },
+    {
+      "id": "supplier_2",
+      "type": "supplier",
+      "name": "Supplier 2"
+    },
+    {
+      "id": "supplier_3",
+      "type": "supplier",
+      "name": "Supplier 3"
+    },
+    {
+      "id": "parent_1",
+      "type": "parent_company",
+      "name": "Parent 1"
+    },
+    {
+      "id": "parent_2",
+      "type": "parent_company",
+      "name": "Parent 2"
+    },
+    {
+      "id": "site_1",
+      "type": "site",
+      "name": "Site 1"
+    },
+    {
+      "id": "site_2",
+      "type": "site",
+      "name": "Site 2"
+    }
+  ],
+  "relations": [
+    {
+      "from": "supplier_1",
+      "relation": "owned_by",
+      "to": "parent_1"
+    },
+    {
+      "from": "supplier_2",
+      "relation": "owned_by",
+      "to": "parent_1"
+    },
+    {
+      "from": "supplier_3",
+      "relation": "owned_by",
+      "to": "parent_2"
+    },
+    {
+      "from": "supplier_1",
+      "relation": "serves",
+      "to": "site_1"
+    },
+    {
+      "from": "supplier_2",
+      "relation": "serves",
+      "to": "site_2"
+    },
+    {
+      "from": "supplier_3",
+      "relation": "serves",
+      "to": "site_1"
+    }
+  ],
+  "semantic_rules": [
+    {
+      "name": "same_parent_company_suppliers_are_related",
+      "source_type": "supplier",
+      "target_type": "supplier",
+      "through_relation": "owned_by",
+      "new_relation": "related_to"
+    }
+  ],
+  "workers": [
+    {
+      "worker_id": "W001",
+      "skills": [
+        "skill_1"
+      ],
+      "capacity": 1,
+      "location": "Depot_A"
+    },
+    {
+      "worker_id": "W002",
+      "skills": [
+        "skill_2"
+      ],
+      "capacity": 2,
+      "location": "Depot_B"
+    },
+    {
+      "worker_id": "W003",
+      "skills": [
+        "skill_3"
+      ],
+      "capacity": 1,
+      "location": "Depot_C"
+    }
+  ],
+  "event_rules": [
+    {
+      "event_type": "power_spike",
+      "alert_type": "power_incident",
+      "site_task_templates": [
+        {
+          "task_type": "repair_power",
+          "priority": 10,
+          "duration": 1,
+          "required_skill": "skill_1",
+          "location_mode": "event_site"
+        },
+        {
+          "task_type": "site_inspection",
+          "priority": 7,
+          "duration": 1,
+          "required_skill": "skill_3",
+          "location_mode": "event_site"
+        }
+      ],
+      "supplier_task_templates": [
+        {
+          "task_type": "supplier_coordination",
+          "priority": 6,
+          "duration": 1,
+          "required_skill": "skill_2",
+          "location_mode": "supplier_site"
+        }
+      ]
+    }
+  ],
+  "last_operation": {
+    "input_event": {
+      "site_id": "site_1",
+      "event_type": "power_spike"
+    },
+    "detection": {
+      "alert_type": "power_incident",
+      "site_id": "site_1",
+      "status": "detected"
+    },
+    "graph_impact": {
+      "direct_suppliers": [
+        "supplier_1",
+        "supplier_3"
+      ],
+      "semantic_related_suppliers": {
+        "supplier_1": [
+          "supplier_2"
+        ],
+        "supplier_3": []
+      },
+      "related_entities_within_2_hops": [
+        {
+          "entity_id": "supplier_1",
+          "entity_type": "supplier",
+          "via_relation": "rev_serves",
+          "hops": 1
+        },
+        {
+          "entity_id": "supplier_3",
+          "entity_type": "supplier",
+          "via_relation": "rev_serves",
+          "hops": 1
+        },
+        {
+          "entity_id": "parent_1",
+          "entity_type": "parent_company",
+          "via_relation": "owned_by",
+          "hops": 2
+        },
+        {
+          "entity_id": "supplier_2",
+          "entity_type": "supplier",
+          "via_relation": "related_to",
+          "hops": 2
+        },
+        {
+          "entity_id": "parent_2",
+          "entity_type": "parent_company",
+          "via_relation": "owned_by",
+          "hops": 2
+        }
+      ]
+    },
+    "response_tasks": [
+      {
+        "task_id": "T001",
+        "type": "repair_power",
+        "priority": 10,
+        "duration": 1,
+        "required_skill": "skill_1",
+        "location": "site_1",
+        "reason": "event:power_spike@site_1"
+      },
+      {
+        "task_id": "T002",
+        "type": "site_inspection",
+        "priority": 7,
+        "duration": 1,
+        "required_skill": "skill_3",
+        "location": "site_1",
+        "reason": "event:power_spike@site_1"
+      },
+      {
+        "task_id": "T003",
+        "type": "supplier_coordination",
+        "priority": 6,
+        "duration": 1,
+        "required_skill": "skill_2",
+        "location": "site_1",
+        "reason": "supplier_impact:supplier_1",
+        "supplier_id": "supplier_1"
+      },
+      {
+        "task_id": "T004",
+        "type": "supplier_coordination",
+        "priority": 6,
+        "duration": 1,
+        "required_skill": "skill_2",
+        "location": "site_2",
+        "reason": "supplier_impact:supplier_2",
+        "supplier_id": "supplier_2"
+      },
+      {
+        "task_id": "T005",
+        "type": "supplier_coordination",
+        "priority": 6,
+        "duration": 1,
+        "required_skill": "skill_2",
+        "location": "site_1",
+        "reason": "supplier_impact:supplier_3",
+        "supplier_id": "supplier_3"
+      }
+    ],
+    "allocation": {
+      "assignments": [
+        {
+          "task_id": "T001",
+          "task_type": "repair_power",
+          "priority": 10,
+          "duration": 1,
+          "required_skill": "skill_1",
+          "task_location": "site_1",
+          "worker_id": "W001",
+          "worker_skills": [
+            "skill_1"
+          ],
+          "worker_location": "Depot_A",
+          "source_reason": "event:power_spike@site_1",
+          "supplier_id": null
+        },
+        {
+          "task_id": "T002",
+          "task_type": "site_inspection",
+          "priority": 7,
+          "duration": 1,
+          "required_skill": "skill_3",
+          "task_location": "site_1",
+          "worker_id": "W003",
+          "worker_skills": [
+            "skill_3"
+          ],
+          "worker_location": "Depot_C",
+          "source_reason": "event:power_spike@site_1",
+          "supplier_id": null
+        },
+        {
+          "task_id": "T003",
+          "task_type": "supplier_coordination",
+          "priority": 6,
+          "duration": 1,
+          "required_skill": "skill_2",
+          "task_location": "site_1",
+          "worker_id": "W002",
+          "worker_skills": [
+            "skill_2"
+          ],
+          "worker_location": "Depot_B",
+          "source_reason": "supplier_impact:supplier_1",
+          "supplier_id": "supplier_1"
+        },
+        {
+          "task_id": "T004",
+          "task_type": "supplier_coordination",
+          "priority": 6,
+          "duration": 1,
+          "required_skill": "skill_2",
+          "task_location": "site_2",
+          "worker_id": "W002",
+          "worker_skills": [
+            "skill_2"
+          ],
+          "worker_location": "Depot_B",
+          "source_reason": "supplier_impact:supplier_2",
+          "supplier_id": "supplier_2"
+        }
+      ],
+      "unassigned_tasks": [
+        {
+          "task_id": "T005",
+          "type": "supplier_coordination",
+          "priority": 6,
+          "duration": 1,
+          "required_skill": "skill_2",
+          "location": "site_1",
+          "reason": "no_available_worker_with_skill_and_capacity",
+          "source_reason": "supplier_impact:supplier_3",
+          "supplier_id": "supplier_3"
+        }
+      ],
+      "total_priority_completed": 29,
+      "total_priority_unassigned": 6,
+      "worker_utilization": [
+        {
+          "worker_id": "W001",
+          "capacity": 1,
+          "used": 1,
+          "remaining": 0,
+          "utilization": 1.0
+        },
+        {
+          "worker_id": "W002",
+          "capacity": 2,
+          "used": 2,
+          "remaining": 0,
+          "utilization": 1.0
+        },
+        {
+          "worker_id": "W003",
+          "capacity": 1,
+          "used": 1,
+          "remaining": 0,
+          "utilization": 1.0
+        }
+      ]
+    }
+  },
+  "last_explanation": null
+}

@@ -1,0 +1,343 @@
+# pal_core_02_predict.py
+#
+# PAL Core 02 - Predict
+#
+# Commands:
+#   1) demo        -> load demo network, show baseline, apply demo block, show prediction
+#   2) status      -> show current network state and predicted routes
+#   3) reset       -> reset to demo network with no blocked edges
+#   4) block A B   -> block directed edge A -> B, then show prediction
+#   5) unblock A B -> unblock directed edge A -> B, then show prediction
+#
+# Examples:
+#   python pal_core_02_predict.py demo
+#   python pal_core_02_predict.py status
+#   python pal_core_02_predict.py block B C
+#   python pal_core_02_predict.py unblock B C
+#   python pal_core_02_predict.py reset
+#
+# Notes:
+# - Deterministic only
+# - No AI needed in v1
+# - Uses a small hardcoded network
+# - Predicts downstream effects of blocked roads/edges
+
+import json
+import heapq
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# --------------------------------------------------
+# 1 FILES / CONSTANTS
+# --------------------------------------------------
+STATE_FILE = Path("pal_core_predict_state.json")
+
+DEMO_NETWORK = {
+    "nodes": ["A", "B", "C", "D", "E"],
+    "edges": [
+        {"from": "A", "to": "B", "cost": 2},
+        {"from": "B", "to": "C", "cost": 2},
+        {"from": "A", "to": "D", "cost": 3},
+        {"from": "D", "to": "C", "cost": 2},
+        {"from": "B", "to": "D", "cost": 1},
+        {"from": "D", "to": "E", "cost": 2},
+        {"from": "E", "to": "C", "cost": 1},
+    ],
+    "routes": [
+        {"route_id": "ROUTE_001", "from": "A", "to": "C"},
+        {"route_id": "ROUTE_002", "from": "B", "to": "C"},
+        {"route_id": "ROUTE_003", "from": "A", "to": "E"},
+    ],
+    "blocked_edges": [],
+}
+
+# --------------------------------------------------
+# 2 HELPERS
+# --------------------------------------------------
+def make_edge_key(u: str, v: str) -> str:
+    return f"{u}->{v}"
+
+def parse_edge_key(key: str) -> Tuple[str, str]:
+    parts = key.split("->")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid edge key: {key}")
+    return parts[0], parts[1]
+
+def build_adjacency(state: Dict[str, Any], blocked_edges: Optional[Set[str]] = None) -> Dict[str, List[Tuple[str, int]]]:
+    if blocked_edges is None:
+        blocked_edges = set(state.get("blocked_edges", []))
+
+    adj: Dict[str, List[Tuple[str, int]]] = {n: [] for n in state["nodes"]}
+    for e in state["edges"]:
+        u = e["from"]
+        v = e["to"]
+        c = int(e["cost"])
+        if make_edge_key(u, v) in blocked_edges:
+            continue
+        adj[u].append((v, c))
+    return adj
+
+def dijkstra_path(state: Dict[str, Any], start: str, goal: str, blocked_edges: Optional[Set[str]] = None) -> Optional[Dict[str, Any]]:
+    adj = build_adjacency(state, blocked_edges)
+    pq: List[Tuple[int, str, List[str]]] = [(0, start, [start])]
+    best_cost: Dict[str, int] = {start: 0}
+
+    while pq:
+        cost, node, path = heapq.heappop(pq)
+
+        if node == goal:
+            return {
+                "path": path,
+                "cost": cost,
+            }
+
+        if cost > best_cost.get(node, 10**18):
+            continue
+
+        for nxt, edge_cost in adj.get(node, []):
+            new_cost = cost + edge_cost
+            if new_cost < best_cost.get(nxt, 10**18):
+                best_cost[nxt] = new_cost
+                heapq.heappush(pq, (new_cost, nxt, path + [nxt]))
+
+    return None
+
+def compute_route_predictions(state: Dict[str, Any], blocked_edges: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
+    preds: List[Dict[str, Any]] = []
+    for route in state["routes"]:
+        rid = route["route_id"]
+        start = route["from"]
+        goal = route["to"]
+
+        baseline = dijkstra_path(state, start, goal, blocked_edges=set())
+        current = dijkstra_path(state, start, goal, blocked_edges=blocked_edges)
+
+        row: Dict[str, Any] = {
+            "route_id": rid,
+            "from": start,
+            "to": goal,
+            "baseline_path": baseline["path"] if baseline else None,
+            "baseline_cost": baseline["cost"] if baseline else None,
+            "current_path": current["path"] if current else None,
+            "current_cost": current["cost"] if current else None,
+            "status": "ok",
+            "extra_cost": 0,
+            "rerouted": False,
+        }
+
+        if baseline is None and current is None:
+            row["status"] = "no_path_defined"
+        elif baseline is not None and current is None:
+            row["status"] = "blocked"
+        elif baseline is None and current is not None:
+            row["status"] = "new_path_found"
+        else:
+            row["extra_cost"] = int(current["cost"]) - int(baseline["cost"])
+            row["rerouted"] = current["path"] != baseline["path"]
+            row["status"] = "rerouted" if row["rerouted"] else "ok"
+
+        preds.append(row)
+
+    return preds
+
+def compute_hotspots(predictions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    baseline_counts: Dict[str, int] = {}
+    current_counts: Dict[str, int] = {}
+
+    def add_counts(path: Optional[List[str]], bucket: Dict[str, int]) -> None:
+        if not path:
+            return
+        for node in path[1:-1]:
+            bucket[node] = bucket.get(node, 0) + 1
+
+    for p in predictions:
+        add_counts(p.get("baseline_path"), baseline_counts)
+        add_counts(p.get("current_path"), current_counts)
+
+    all_nodes = sorted(set(baseline_counts.keys()) | set(current_counts.keys()))
+    hotspots: List[Dict[str, Any]] = []
+    for node in all_nodes:
+        base_n = baseline_counts.get(node, 0)
+        curr_n = current_counts.get(node, 0)
+        delta = curr_n - base_n
+        if delta > 0:
+            hotspots.append({
+                "node": node,
+                "baseline_load": base_n,
+                "current_load": curr_n,
+                "delta": delta,
+            })
+
+    hotspots.sort(key=lambda x: (-x["delta"], x["node"]))
+    return hotspots
+
+def summarize_prediction(state: Dict[str, Any]) -> Dict[str, Any]:
+    blocked_edges = set(state.get("blocked_edges", []))
+    predictions = compute_route_predictions(state, blocked_edges)
+    hotspots = compute_hotspots(predictions)
+
+    impacted_routes = sum(1 for p in predictions if p["status"] in ("rerouted", "blocked"))
+    blocked_routes = sum(1 for p in predictions if p["status"] == "blocked")
+    rerouted_routes = sum(1 for p in predictions if p["status"] == "rerouted")
+    total_extra_cost = sum(int(p.get("extra_cost", 0)) for p in predictions if p["current_path"] is not None)
+
+    return {
+        "blocked_edges": sorted(blocked_edges),
+        "route_predictions": predictions,
+        "impacted_routes": impacted_routes,
+        "blocked_routes": blocked_routes,
+        "rerouted_routes": rerouted_routes,
+        "total_extra_cost": total_extra_cost,
+        "hotspots": hotspots,
+    }
+
+def save_state(state: Dict[str, Any]) -> None:
+    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def load_state() -> Dict[str, Any]:
+    if not STATE_FILE.exists():
+        return json.loads(json.dumps(DEMO_NETWORK))
+    data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    return data
+
+def reset_state() -> Dict[str, Any]:
+    state = json.loads(json.dumps(DEMO_NETWORK))
+    save_state(state)
+    return state
+
+def print_usage() -> None:
+    print(
+        "Usage:\n"
+        "  python pal_core_02_predict.py demo\n"
+        "  python pal_core_02_predict.py status\n"
+        "  python pal_core_02_predict.py reset\n"
+        "  python pal_core_02_predict.py block <FROM> <TO>\n"
+        "  python pal_core_02_predict.py unblock <FROM> <TO>\n\n"
+        "Examples:\n"
+        "  python pal_core_02_predict.py demo\n"
+        "  python pal_core_02_predict.py status\n"
+        "  python pal_core_02_predict.py block B C\n"
+        "  python pal_core_02_predict.py unblock B C\n"
+        "  python pal_core_02_predict.py reset"
+    )
+
+def print_state_and_prediction(state: Dict[str, Any]) -> None:
+    print("=== NETWORK STATE ===")
+    print(json.dumps({
+        "nodes": state["nodes"],
+        "edges": state["edges"],
+        "routes": state["routes"],
+        "blocked_edges": state["blocked_edges"],
+    }, indent=2, ensure_ascii=False))
+
+    print("\n=== PREDICTION ===")
+    print(json.dumps(summarize_prediction(state), indent=2, ensure_ascii=False))
+
+# --------------------------------------------------
+# 3 COMMANDS
+# --------------------------------------------------
+def cmd_demo() -> None:
+    state = reset_state()
+    print("DEMO OK")
+    print(f"Saved state to: {STATE_FILE.resolve()}")
+    print("\n=== BASELINE ===")
+    print(json.dumps(summarize_prediction(state), indent=2, ensure_ascii=False))
+
+    edge_key = make_edge_key("B", "C")
+    state["blocked_edges"] = [edge_key]
+    save_state(state)
+
+    print("\n=== APPLY DEMO BLOCK ===")
+    print(f"Blocked edge: {edge_key}")
+
+    print("\n=== PREDICTION AFTER BLOCK ===")
+    print(json.dumps(summarize_prediction(state), indent=2, ensure_ascii=False))
+
+def cmd_status() -> None:
+    state = load_state()
+    print_state_and_prediction(state)
+
+def cmd_reset() -> None:
+    state = reset_state()
+    print("RESET OK")
+    print(f"Saved state to: {STATE_FILE.resolve()}")
+    print_state_and_prediction(state)
+
+def cmd_block(u: str, v: str) -> None:
+    state = load_state()
+    edge_key = make_edge_key(u, v)
+
+    valid_edges = {make_edge_key(e["from"], e["to"]) for e in state["edges"]}
+    if edge_key not in valid_edges:
+        print("BLOCK FAILED")
+        print(f"Edge not found: {edge_key}")
+        return
+
+    blocked = set(state.get("blocked_edges", []))
+    blocked.add(edge_key)
+    state["blocked_edges"] = sorted(blocked)
+    save_state(state)
+
+    print("BLOCK OK")
+    print(f"Blocked edge: {edge_key}")
+    print_state_and_prediction(state)
+
+def cmd_unblock(u: str, v: str) -> None:
+    state = load_state()
+    edge_key = make_edge_key(u, v)
+
+    blocked = set(state.get("blocked_edges", []))
+    if edge_key not in blocked:
+        print("UNBLOCK OK")
+        print(f"Edge was not blocked: {edge_key}")
+        print_state_and_prediction(state)
+        return
+
+    blocked.remove(edge_key)
+    state["blocked_edges"] = sorted(blocked)
+    save_state(state)
+
+    print("UNBLOCK OK")
+    print(f"Unblocked edge: {edge_key}")
+    print_state_and_prediction(state)
+
+# --------------------------------------------------
+# 4 MAIN
+# --------------------------------------------------
+def main() -> None:
+    if len(sys.argv) < 2:
+        print_usage()
+        return
+
+    command = sys.argv[1].strip().lower()
+
+    if command == "demo":
+        cmd_demo()
+
+    elif command == "status":
+        cmd_status()
+
+    elif command == "reset":
+        cmd_reset()
+
+    elif command == "block":
+        if len(sys.argv) < 4:
+            print("Missing FROM and TO for block.\n")
+            print_usage()
+            return
+        cmd_block(sys.argv[2], sys.argv[3])
+
+    elif command == "unblock":
+        if len(sys.argv) < 4:
+            print("Missing FROM and TO for unblock.\n")
+            print_usage()
+            return
+        cmd_unblock(sys.argv[2], sys.argv[3])
+
+    else:
+        print(f"Unknown command: {command}\n")
+        print_usage()
+
+if __name__ == "__main__":
+    main()

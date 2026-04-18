@@ -1,0 +1,64 @@
+{
+  "nodes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+  ],
+  "edges": [
+    {
+      "from": "A",
+      "to": "B",
+      "cost": 2
+    },
+    {
+      "from": "B",
+      "to": "C",
+      "cost": 2
+    },
+    {
+      "from": "A",
+      "to": "D",
+      "cost": 3
+    },
+    {
+      "from": "D",
+      "to": "C",
+      "cost": 2
+    },
+    {
+      "from": "B",
+      "to": "D",
+      "cost": 1
+    },
+    {
+      "from": "D",
+      "to": "E",
+      "cost": 2
+    },
+    {
+      "from": "E",
+      "to": "C",
+      "cost": 1
+    }
+  ],
+  "routes": [
+    {
+      "route_id": "ROUTE_001",
+      "from": "A",
+      "to": "C"
+    },
+    {
+      "route_id": "ROUTE_002",
+      "from": "B",
+      "to": "C"
+    },
+    {
+      "route_id": "ROUTE_003",
+      "from": "A",
+      "to": "E"
+    }
+  ],
+  "blocked_edges": []
+}

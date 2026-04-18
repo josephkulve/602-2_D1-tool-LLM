@@ -1,0 +1,82 @@
+{
+  "entities": [
+    {
+      "id": "supplier_1",
+      "type": "supplier",
+      "name": "Supplier 1"
+    },
+    {
+      "id": "supplier_2",
+      "type": "supplier",
+      "name": "Supplier 2"
+    },
+    {
+      "id": "supplier_3",
+      "type": "supplier",
+      "name": "Supplier 3"
+    },
+    {
+      "id": "parent_1",
+      "type": "parent_company",
+      "name": "Parent 1"
+    },
+    {
+      "id": "parent_2",
+      "type": "parent_company",
+      "name": "Parent 2"
+    },
+    {
+      "id": "site_1",
+      "type": "site",
+      "name": "Site 1"
+    },
+    {
+      "id": "site_2",
+      "type": "site",
+      "name": "Site 2"
+    },
+    {
+      "id": "incident_1",
+      "type": "incident",
+      "name": "Incident 1 Site 1"
+    }
+  ],
+  "relations": [
+    {
+      "from": "supplier_1",
+      "relation": "owned_by",
+      "to": "parent_1"
+    },
+    {
+      "from": "supplier_2",
+      "relation": "owned_by",
+      "to": "parent_1"
+    },
+    {
+      "from": "supplier_3",
+      "relation": "owned_by",
+      "to": "parent_2"
+    },
+    {
+      "from": "supplier_1",
+      "relation": "serves",
+      "to": "site_1"
+    },
+    {
+      "from": "supplier_2",
+      "relation": "serves",
+      "to": "site_2"
+    },
+    {
+      "from": "supplier_3",
+      "relation": "serves",
+      "to": "site_1"
+    },
+    {
+      "from": "incident_1",
+      "relation": "occurred_at",
+      "to": "site_1"
+    }
+  ],
+  "semantic_rules": []
+}

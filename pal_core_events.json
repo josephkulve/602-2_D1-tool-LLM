@@ -1,0 +1,44 @@
+[
+  {
+    "site": "A",
+    "type": "power_spike",
+    "severity": 2,
+    "note": "E001 unexpected jump in electricity usage",
+    "timestamp": "2026-04-11T10:00:00+00:00"
+  },
+  {
+    "site": "A",
+    "type": "camera_offline",
+    "severity": 1,
+    "note": "E002 camera feed lost",
+    "timestamp": "2026-04-11T10:08:00+00:00"
+  },
+  {
+    "site": "A",
+    "type": "truck_delay",
+    "severity": 2,
+    "note": "E003 vehicle delay near site",
+    "timestamp": "2026-04-11T10:20:00+00:00"
+  },
+  {
+    "site": "B",
+    "type": "power_spike",
+    "severity": 1,
+    "note": "E004 minor fluctuation",
+    "timestamp": "2026-04-11T10:03:00+00:00"
+  },
+  {
+    "site": "B",
+    "type": "truck_delay",
+    "severity": 1,
+    "note": "E005 small traffic delay",
+    "timestamp": "2026-04-11T10:40:00+00:00"
+  },
+  {
+    "site": "A",
+    "type": "power_spike",
+    "severity": 2,
+    "timestamp": "2026-04-11T20:38:50.999465+00:00",
+    "note": "E006 no_note"
+  }
+]

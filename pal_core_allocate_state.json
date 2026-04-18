@@ -1,0 +1,72 @@
+{
+  "tasks": [
+    {
+      "task_id": "T001",
+      "type": "repair",
+      "priority": 10,
+      "duration": 2,
+      "required_skill": "repair",
+      "location": "Site_A"
+    },
+    {
+      "task_id": "T002",
+      "type": "delivery",
+      "priority": 6,
+      "duration": 1,
+      "required_skill": "delivery",
+      "location": "Site_B"
+    },
+    {
+      "task_id": "T003",
+      "type": "inspection",
+      "priority": 4,
+      "duration": 1,
+      "required_skill": "inspect",
+      "location": "Site_C"
+    },
+    {
+      "task_id": "T004",
+      "type": "repair",
+      "priority": 8,
+      "duration": 2,
+      "required_skill": "repair",
+      "location": "Site_D"
+    },
+    {
+      "task_id": "T005",
+      "type": "delivery",
+      "priority": 3,
+      "duration": 1,
+      "required_skill": "delivery",
+      "location": "Site_E"
+    }
+  ],
+  "workers": [
+    {
+      "worker_id": "W001",
+      "skills": [
+        "repair"
+      ],
+      "capacity": 2,
+      "location": "Depot_1"
+    },
+    {
+      "worker_id": "W002",
+      "skills": [
+        "delivery",
+        "inspect"
+      ],
+      "capacity": 2,
+      "location": "Depot_2"
+    },
+    {
+      "worker_id": "W003",
+      "skills": [
+        "repair",
+        "inspect"
+      ],
+      "capacity": 1,
+      "location": "Depot_3"
+    }
+  ]
+}
